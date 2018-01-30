@@ -11,19 +11,18 @@ import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
+from math import *
 
 from NPTFit import nptfit # module for performing scan
 from NPTFit import dnds_analysis # module for analysing the output
 from matplotlib import pyplot as plt # to see plots
-
-import numpy as np
-
-#Example 1: A map without point sources
-
-import numpy as np
 import scipy.stats as stats
 import matplotlib.pyplot as plt
 
+import pymultinest
+
+
+########## making an energy distribution
 def truncated_power_law(a, m):
     E = np.arange(1, m+1,dtype='float') #array of energy values
     pmf = 1/E**a                        #math with arrays like numbers, thanks python!
@@ -45,43 +44,16 @@ def get_spectral_coefficients(a,m):
 
 	return first_spectral_coeff, second_spectral_coeff
 
-
-#mean is an array of the mean number of photons counts in pixel p, it is the usual poissonian parameter
-#spectrals an array of spectral coefficients (lambda_1, lambda_2 . . .) as many as you have energy bins
-#energy data is the number of photons in each pixel in each bin of energy, it is a 2D array
-#[pixels,energy bins] so energy_data[3,1] is the number of counts in the 4th pixel and 2nd energy bin
-def loglike(mean, spectrals, energy_data):
-
-
-	data = np.sum(energy_data, axis=0)
-	ll = 0
-
-	for p in range(0,len(mean)):
-		#print('pixel ', p)
-		ll += -mean[p] + data[p]*np.log(mean[p]) #- lgamma(data[p] + 1.) comes from cython and cython doesn't work
-		for s in range(0,len(spectrals)):
-			#print('energy bin ', s)
-			ll += energy_data[s][p]
-
-	return ll
-
-a, m = .5, 3 
+a, m = .5, 3 #method for distributing energy data into two bins. found online. where? i dunno either
 first_spectral_coeff, second_spectral_coeff = get_spectral_coefficients(a,m)
 print('first spectral coefficient = ', first_spectral_coeff)
 print('second spectral coefficient = ', second_spectral_coeff)
 
 nside = 2
 npix = hp.nside2npix(nside)
-data = np.zeros(npix)
-
-print('number of pixels = ', npix)
 
 #Uncomment below to make poissonian data
 data = np.random.poisson(1,npix)
-
-#Uncomment below to make non poissonian point source data
-#for ips in range(10):
-#	data[np.random.randint(npix)] += np.random.poisson(50)
 
 #Split the data up into energy bins	
 data_bin1 = data*first_spectral_coeff  #This is the number of photons in the first energy bin according to the power law
@@ -95,46 +67,75 @@ hp.mollview(data_bin1, title='Fake Data, photons in energy bin 1', min=0, max=ma
 hp.mollview(data_bin2, title='Fake Data, photons in energy bin 2', min=0, max=max_counts)
 hp.mollview(data, title='Fake Data, total number of photons', min=0, max=max_counts)
 hp.mollview(data_bin1 + data_bin2, 'Fake Data, photons in energy bin 1 + photons in energy bin 2', min=0, max=max_counts)
-#hp.mollview(exposure,title='Exposure Map')
 
-
-spectrals = [0.5973, 0.40269]
-mean = np.ones(npix)
 energy_data = [data_bin1, data_bin2]
+parameters = ["mean","spectral_0","spectral_1"]
+n_params = len(parameters)
+theta_interval = [[0,2],[0.0,1.0],[0.0,1.0]]
 
-print('the log likehood = ', loglike(mean, spectrals, energy_data))
+#mean is an array of the mean number of photons counts in pixel p, it is the usual poissonian parameter
+#spectrals an array of spectral coefficients (lambda_1, lambda_2 . . .) as many as you have energy bins
+#energy data is the number of photons in each pixel in each bin of energy, it is a 2D array
+#[pixels,energy bins] so energy_data[3,1] is the number of counts in the 4th pixel and 2nd energy bin
+def loglike(cube, ndim, nparams):
 
-plt.plot()
-plt.show()
+	ll = 0
 
-print('bin1 = ', data_bin1)
-print('bin2 = ', data_bin2)
+	for p in range(0,len(energy_data[0])):
+		#print('pixel ', p)
+		ll += -cube[0] + data[p]*np.log(cube[0]) - lgamma(data[p] + 1.) #comes from cython and cython doesn't work
+		for s in range(0,nparams -1): #the first position in theta is the mean, so need not be considered
+			#print('energy bin ', s)
+			#print('content of bin = ',energy_data[s][p] )
+			ll += energy_data[s][p]*cube[s+1]#similarly, the zeroth position is mean - not a specral coeff. 
 
-iso = np.ones(npix)
-
-n = nptfit.NPTF(tag='SimpleExample')
-n.load_data(data,exposure)
-n.add_template(iso, 'iso_p', units='flux')
-#n.add_template(iso, 'iso_np', units='PS')
-
-n.add_poiss_model('iso_p', '$A_\mathrm{iso}$', [0,2], False)
-#n.add_non_poiss_model('iso_np', ['$A^\mathrm{ps}_\mathrm{iso}$', '$n_1$', '$n_2$', '$S_b$'], [[-10,1], [2.05, 60], [-60,1.95], [0.01,200]], [True, False, False, False])
+	return ll
 
 
-n.configure_for_scan()
-n.perform_scan(nlive=500)
+def min_and_diff(theta_interval):
+	min_theta_interval = []
+	diff_theta_interval = []
+	
+	for i in theta_interval:
+		min_theta_interval.append(i[0])
 
-n.load_scan()
-an = dnds_analysis.Analysis(n)
-an.make_triangle()
-plt.show()
-plt.close()
+		diff_theta_interval.append(i[1] - i[0])
 
-an.plot_intensity_fraction_poiss('iso_p', bins=20, color='cornflowerblue', label='Poissonian')
-an.plot_intensity_fraction_non_poiss('iso_np', bins=20, color='firebrick', label='non-Poissonian')
-plt.xlabel('Flux fraction (\%)')
-plt.legend(fancybox = True)
-plt.xlim(0,100);
-plt.ylim(0,0.4);
+	return min_theta_interval, diff_theta_interval
+
+
+min_theta_interval, diff_theta_interval = min_and_diff(theta_interval)
+
+
+
+######## from 165 in nptf_scan
+def prior_cube(cube, ndim=1, nparams=1):
+    """ Cube of priors; motivated by format required by MultiNest, but can
+            be used for different MCMC evaluators
+    """
+    for i in range(ndim):
+        cube[i] = cube[i] * diff_theta_interval[i] + min_theta_interval[i]
+    return cube
+########
+
+pymultinest_options = {'importance_nested_sampling': False,
+                                   'resume': False, 'verbose': True,
+                                   'sampling_efficiency': 'model',
+                                   'init_MPI': False, 'evidence_tolerance': 0.5,
+                                   'const_efficiency_mode': False}
+
+nlive = 500
+
+ # Run MultiNest
+pymultinest.run(loglike, prior_cube, n_params, outputfiles_basename='/Users/test/NTPFit/EdepSimple_output/',n_live_points=nlive, **pymultinest_options)
+
+a = pymultinest.Analyzer(outputfiles_basename='/Users/test/NTPFit/EdepSimple_output/', n_params = n_params)
+s = a.get_stats()
+
+#medians = [s['marginals'][i]['median'] for i in range(n_params)]
+
+best_fit_params = a.get_best_fit() 
+
+print('The medians for our parameters are: ', best_fit_params)
 
 
